@@ -78,3 +78,44 @@ JSON 输出包含：
 2. 先查看 `Matched entries`，确认 disasm 是否在该范围内解析到 string/literal。
 3. 对照 `ABC hexdump` 中的原始字节，确认偏移、内容和 disasm 输出是否一致。
 4. 如果没有匹配项，使用 `--hexdump-out` 保存 4 KiB hexdump，后续结合 abc 格式、其它符号信息或二进制分析工具继续排查。
+
+## 方法结构化 JSON 导出
+
+`ark_disasm_methods_to_json.py` 用于把 `ark_disasm` 生成的 pandasm 文本转换为按模块聚合的方法结构化 JSON。输出结构以 `modules` 为根节点，每个 module 包含模块 `id`、`name` 和 `methods`；每个 method 包含 `id`、`name`、`pid`、`refs`、`size`、`tag`，并额外保留 `line_start`/`line_end` 方便回溯到原始反汇编文件。
+
+```bash
+python3 ark_disasm_methods_to_json.py app.disasm.txt -o methods.json
+```
+
+字段说明：
+
+- `id`：优先读取反汇编文本中显式的 `id`、`method_id`、`offset` 或 `method_offset`；没有显式值时使用稳定的负数行号作为合成 id。
+- `pid`：解析到调用/定义关系时指向父方法 id；对 ArkTS 常见的生成函数，默认把未显式归属的非 `func_main_0` 方法挂到同模块的 `func_main_0` 下。
+- `refs`：方法体中可解析到的其它方法引用 id。
+- `size`：优先读取显式的 `size`、`code_size` 或 `method_size`；没有显式值时按方法体中的有效指令行数估算。
+- `line_start`/`line_end`：方法在输入反汇编文本中的 1-based 行号，便于人工复核。
+
+示例输出：
+
+```json
+{
+    "modules": [
+        {
+            "id": 256,
+            "name": "Lmod;",
+            "methods": [
+                {
+                    "id": 272,
+                    "name": "func_main_0",
+                    "pid": 0,
+                    "refs": [288],
+                    "size": 2,
+                    "tag": "Func",
+                    "line_start": 8,
+                    "line_end": 10
+                }
+            ]
+        }
+    ]
+}
+```
