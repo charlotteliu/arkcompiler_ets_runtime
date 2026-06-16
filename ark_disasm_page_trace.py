@@ -37,6 +37,17 @@ class Owner:
 
 
 @dataclass
+class Hexdump:
+    file: str
+    start: int
+    end: int
+    requested_size: int
+    available_size: int
+    truncated: bool
+    text: str
+
+
+@dataclass
 class Entry:
     kind: str
     offset: int
@@ -178,6 +189,37 @@ def parse_disassembly(lines: list[str]) -> list[Entry]:
     return entries
 
 
+def read_abc_hexdump(abc: Path, start: int, size: int) -> Hexdump:
+    if start < 0:
+        raise ValueError("offset must be non-negative")
+    if size < 0:
+        raise ValueError("size must be non-negative")
+
+    with abc.open("rb") as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+        f.seek(min(start, file_size))
+        data = f.read(size)
+
+    lines = []
+    for row_start in range(0, len(data), 16):
+        chunk = data[row_start:row_start + 16]
+        hex_bytes = " ".join(f"{b:02x}" for b in chunk)
+        ascii_bytes = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        lines.append(f"{start + row_start:08x}  {hex_bytes:<47}  |{ascii_bytes}|")
+
+    end = start + len(data)
+    return Hexdump(
+        file=str(abc),
+        start=start,
+        end=end,
+        requested_size=size,
+        available_size=len(data),
+        truncated=len(data) < size,
+        text="\n".join(lines),
+    )
+
+
 def page_entries(entries: Iterable[Entry], start: int, size: int) -> list[Entry]:
     end = start + size
     return [e for e in entries if e.offset >= 0 and start <= e.offset <= end]
@@ -195,9 +237,21 @@ def attach_method_context(matches: list[Entry], entries: list[Entry]) -> None:
             match.references.append({"kind": "method_context", "value": json.dumps(contexts, ensure_ascii=False)})
 
 
-def render_text(matches: list[Entry], start: int, size: int) -> str:
+def render_text(matches: list[Entry], start: int, size: int, hexdump: Optional[Hexdump] = None) -> str:
     end = start + size
     out = [f"Page range: [0x{start:x}, 0x{end:x}] ({start}..{end})", f"Matched entries: {len(matches)}"]
+    if hexdump is not None:
+        out.extend([
+            "",
+            f"ABC file: {hexdump.file}",
+            f"ABC bytes read: {hexdump.available_size}/{hexdump.requested_size}" + (" (truncated at EOF)" if hexdump.truncated else ""),
+            "ABC hexdump:",
+        ])
+        if hexdump.text:
+            out.extend(f"  {line}" for line in hexdump.text.splitlines())
+        else:
+            out.append("  <no bytes available in requested range>")
+
     for e in matches:
         owner = ", ".join(f"{k}={v}" for k, v in asdict(e.owner).items() if v) or "unknown"
         out.append("")
@@ -214,19 +268,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Trace a 4 KiB abc page in ark_disasm output.")
     parser.add_argument("offset", help="page start offset, decimal or hex such as 0x1000")
     parser.add_argument("disasm", type=Path, help="ark_disasm pandasm text file")
+    parser.add_argument("abc", nargs="?", type=Path, help="optional abc file; when provided, dump the requested byte range for cross-checking")
     parser.add_argument("--size", type=lambda v: parse_int(v), default=PAGE_SIZE, help="range size, default 4096")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    parser.add_argument("--hexdump-out", type=Path, help="write the abc range hexdump to this file")
     args = parser.parse_args(argv)
 
     start = parse_int(args.offset)
+    hexdump = read_abc_hexdump(args.abc, start, args.size) if args.abc else None
+    if hexdump is not None and args.hexdump_out:
+        args.hexdump_out.write_text(hexdump.text + ("\n" if hexdump.text else ""), encoding="utf-8")
+
     lines = args.disasm.read_text(encoding="utf-8", errors="replace").splitlines()
     entries = parse_disassembly(lines)
     matches = page_entries(entries, start, args.size)
     attach_method_context(matches, entries)
     if args.json:
-        print(json.dumps({"range": {"start": start, "end": start + args.size}, "entries": [asdict(e) for e in matches]}, ensure_ascii=False, indent=2))
+        print(json.dumps({"range": {"start": start, "end": start + args.size}, "hexdump": asdict(hexdump) if hexdump else None, "entries": [asdict(e) for e in matches]}, ensure_ascii=False, indent=2))
     else:
-        print(render_text(matches, start, args.size))
+        print(render_text(matches, start, args.size, hexdump))
     return 0
 
 
